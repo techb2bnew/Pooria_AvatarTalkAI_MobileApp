@@ -1,4 +1,4 @@
-import { EmitterSubscription, PermissionsAndroid, Platform } from 'react-native';
+import { PermissionsAndroid, Platform } from 'react-native';
 import Voice, {
   SpeechErrorEvent,
   SpeechResultsEvent,
@@ -10,30 +10,63 @@ import {
   PersonalityTtsProfile,
 } from '../utils/personalityVoiceReply';
 import { PersonalityId, isPersonalityId } from '../constants/personalityAvatar';
+import { forceMainSpeaker } from './iosAudioSession';
 
 export type VoiceTalkPhase = 'idle' | 'listening' | 'processing' | 'speaking';
 
-let ttsSubscriptions: EmitterSubscription[] = [];
+type VoiceListenerHandlers = {
+  onPartial: (text: string) => void;
+  onFinal: (text: string) => void;
+  onListenEnd: () => void;
+  onError: (event: SpeechErrorEvent) => void;
+  onSpeechStarted?: () => void;
+};
+
+let ttsSubscriptions: Array<{ remove: () => void }> = [];
 let activeSpeakGeneration = 0;
+let voiceHandlers: VoiceListenerHandlers | null = null;
 
 const clearTtsListeners = () => {
   ttsSubscriptions.forEach((sub) => sub.remove());
   ttsSubscriptions = [];
 };
 
+const applyVoiceHandlers = () => {
+  if (!voiceHandlers) {
+    return;
+  }
+  Voice.onSpeechStart = () => voiceHandlers?.onSpeechStarted?.();
+  Voice.onSpeechPartialResults = (e: SpeechResultsEvent) => {
+    const value = pickBestResult(e.value);
+    if (value) {
+      voiceHandlers?.onPartial(value);
+    }
+  };
+  Voice.onSpeechResults = (e: SpeechResultsEvent) => {
+    const value = pickBestResult(e.value);
+    if (value) {
+      voiceHandlers?.onFinal(value);
+    }
+  };
+  Voice.onSpeechEnd = () => voiceHandlers?.onListenEnd();
+  Voice.onSpeechError = (e: SpeechErrorEvent) => voiceHandlers?.onError(e);
+};
+
 export const requestMicPermission = async (): Promise<boolean> => {
   if (Platform.OS !== 'android') {
     return true;
   }
-  const granted = await PermissionsAndroid.request(
-    PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
-    {
-      title: 'Microphone',
-      message: AVATAR_TALK_MIC_DENIED,
-      buttonPositive: 'OK',
-      buttonNegative: 'Cancel',
-    },
-  );
+  const permission = PermissionsAndroid.PERMISSIONS.RECORD_AUDIO;
+  const alreadyGranted = await PermissionsAndroid.check(permission);
+  if (alreadyGranted) {
+    return true;
+  }
+  const granted = await PermissionsAndroid.request(permission, {
+    title: 'Microphone',
+    message: AVATAR_TALK_MIC_DENIED,
+    buttonPositive: 'OK',
+    buttonNegative: 'Cancel',
+  });
   return granted === PermissionsAndroid.RESULTS.GRANTED;
 };
 
@@ -46,7 +79,9 @@ export const initVoiceTalk = async () => {
     }
   }
   await Tts.setDefaultLanguage('en-US');
-  await Tts.setIgnoreSilentSwitch('ignore');
+  if (Platform.OS === 'ios') {
+    await Tts.setIgnoreSilentSwitch('ignore');
+  }
 };
 
 const pickBestResult = (values?: string[]) => {
@@ -56,29 +91,10 @@ const pickBestResult = (values?: string[]) => {
   return values.reduce((a, b) => (b.length > a.length ? b : a), values[0]);
 };
 
-export const bindVoiceListeners = (handlers: {
-  onPartial: (text: string) => void;
-  onFinal: (text: string) => void;
-  onListenEnd: () => void;
-  onError: () => void;
-  onSpeechStarted?: () => void;
-}) => {
+export const bindVoiceListeners = (handlers: VoiceListenerHandlers) => {
+  voiceHandlers = handlers;
   Voice.removeAllListeners();
-  Voice.onSpeechStart = () => handlers.onSpeechStarted?.();
-  Voice.onSpeechPartialResults = (e: SpeechResultsEvent) => {
-    const value = pickBestResult(e.value);
-    if (value) {
-      handlers.onPartial(value);
-    }
-  };
-  Voice.onSpeechResults = (e: SpeechResultsEvent) => {
-    const value = pickBestResult(e.value);
-    if (value) {
-      handlers.onFinal(value);
-    }
-  };
-  Voice.onSpeechEnd = () => handlers.onListenEnd();
-  Voice.onSpeechError = (_e: SpeechErrorEvent) => handlers.onError();
+  applyVoiceHandlers();
 };
 
 export const stopSpeaking = async (): Promise<void> => {
@@ -108,6 +124,21 @@ export const stopListening = async () => {
   }
 };
 
+/** iOS mic uses PlayAndRecord (earpiece). Tear down before TTS loudspeaker. */
+export const releaseMicForPlayback = async (): Promise<void> => {
+  await stopListening();
+  if (Platform.OS !== 'ios') {
+    return;
+  }
+  try {
+    await Voice.destroy();
+  } catch {
+    // ignore
+  }
+  await forceMainSpeaker();
+  await new Promise<void>((resolve) => setTimeout(resolve, 350));
+};
+
 export const haltAllVoice = async () => {
   await stopSpeaking();
   await stopListening();
@@ -115,6 +146,7 @@ export const haltAllVoice = async () => {
 
 export const unbindVoiceTalk = async () => {
   await haltAllVoice();
+  voiceHandlers = null;
   try {
     await Voice.destroy();
     Voice.removeAllListeners();
@@ -124,12 +156,33 @@ export const unbindVoiceTalk = async () => {
 };
 
 export const startListening = async () => {
-  await haltAllVoice();
+  await stopSpeaking();
   if (Platform.OS === 'android') {
-    await Voice.start('en-US', {
+    try {
+      await Voice.destroy();
+    } catch {
+      // ignore
+    }
+  } else {
+    await stopListening();
+  }
+
+  applyVoiceHandlers();
+
+  if (Platform.OS === 'android') {
+    const androidOptions = {
       EXTRA_PARTIAL_RESULTS: true,
       EXTRA_MAX_RESULTS: 5,
-    });
+      REQUEST_PERMISSIONS_AUTO: false,
+    };
+    try {
+      await Voice.start('en-US', {
+        ...androidOptions,
+        RECOGNIZER_ENGINE: 'GOOGLE',
+      });
+    } catch {
+      await Voice.start('en-US', androidOptions);
+    }
   } else {
     await Voice.start('en-US');
   }
@@ -170,11 +223,11 @@ export const speakReply = async (
       onStart?.();
     }
   });
+  const endEvents: Array<'tts-finish' | 'tts-cancel' | 'tts-error'> =
+    Platform.OS === 'ios' ? ['tts-finish'] : ['tts-finish', 'tts-cancel', 'tts-error'];
   ttsSubscriptions = [
     startSub,
-    Tts.addEventListener('tts-finish', finish),
-    Tts.addEventListener('tts-cancel', finish),
-    Tts.addEventListener('tts-error', finish),
+    ...endEvents.map((type) => Tts.addEventListener(type, finish)),
   ];
 
   try {
@@ -200,4 +253,13 @@ export const speakReply = async (
       },
     });
   }
+};
+
+export const isBenignAndroidSpeechError = (event: SpeechErrorEvent): boolean => {
+  if (Platform.OS !== 'android') {
+    return false;
+  }
+  const code = String(event?.error?.code ?? '');
+  // 7 = no match, 11 = didn't understand — common while pausing between words
+  return code === '7' || code === '11';
 };

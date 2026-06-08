@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert } from 'react-native';
+import { Alert, Platform } from 'react-native';
 import {
   AvatarEmotionId,
   getPersonalityConfig,
@@ -13,20 +13,23 @@ import {
   bindVoiceListeners,
   haltAllVoice,
   initVoiceTalk,
+  isBenignAndroidSpeechError,
+  releaseMicForPlayback,
   requestMicPermission,
-  speakReply,
   startListening,
-  stopListening,
-  stopSpeaking,
   unbindVoiceTalk,
   VoiceTalkPhase,
 } from '../services/voiceTalk';
 import { buildPersonalityVoiceReply } from '../utils/personalityVoiceReply';
+import { speakLine, stopSpeakLine } from '../utils/ttsTest';
 
 type UseAvatarVoiceTalkParams = {
   personalityId: string;
   avatarName: string;
 };
+
+/** iOS needs a beat for final transcript; Android is near-instant like before */
+const REPLY_AFTER_SILENCE_MS = Platform.OS === 'ios' ? 900 : 300;
 
 export const useAvatarVoiceTalk = ({
   personalityId,
@@ -42,6 +45,8 @@ export const useAvatarVoiceTalk = ({
 
   const transcriptRef = useRef('');
   const phaseRef = useRef<VoiceTalkPhase>('idle');
+  const processingRef = useRef(false);
+  const replyDelayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const setPhaseSafe = useCallback((next: VoiceTalkPhase) => {
     phaseRef.current = next;
@@ -53,13 +58,43 @@ export const useAvatarVoiceTalk = ({
     setPhaseSafe('idle');
   }, [defaultEmotion, setPhaseSafe]);
 
+  const cancelReplyDelay = useCallback(() => {
+    if (replyDelayTimerRef.current) {
+      clearTimeout(replyDelayTimerRef.current);
+      replyDelayTimerRef.current = null;
+    }
+  }, []);
+
   const updateTranscript = useCallback((text: string) => {
     transcriptRef.current = text;
     setLiveTranscript(text);
   }, []);
 
+  const processRef = useRef<(raw: string) => Promise<void>>(async () => {});
+
+  const scheduleReplyAfterSilence = useCallback(() => {
+    if (phaseRef.current !== 'listening') {
+      return;
+    }
+    cancelReplyDelay();
+    replyDelayTimerRef.current = setTimeout(() => {
+      replyDelayTimerRef.current = null;
+      if (phaseRef.current !== 'listening') {
+        return;
+      }
+      if (!transcriptRef.current.trim()) {
+        return;
+      }
+      void processRef.current(transcriptRef.current);
+    }, REPLY_AFTER_SILENCE_MS);
+  }, [cancelReplyDelay]);
+
   const processTranscript = useCallback(
     async (raw: string) => {
+      if (processingRef.current) {
+        return;
+      }
+
       const text = raw.trim() || transcriptRef.current.trim();
       if (!text) {
         resetToIdle();
@@ -68,6 +103,8 @@ export const useAvatarVoiceTalk = ({
         return;
       }
 
+      cancelReplyDelay();
+      processingRef.current = true;
       setLiveTranscript(text);
       setPhaseSafe('processing');
       setEmotion('thinking');
@@ -79,16 +116,21 @@ export const useAvatarVoiceTalk = ({
       );
       setAvatarReplyText(reply);
 
+      await releaseMicForPlayback();
+
       setPhaseSafe('speaking');
       setEmotion('talking');
-      await speakReply(reply, personalityId, resetToIdle, () =>
-        setEmotion('talking'),
-      );
+      await speakLine(reply, {
+        onStart: () => setEmotion('talking'),
+        onDone: () => {
+          processingRef.current = false;
+          resetToIdle();
+        },
+      });
     },
-    [avatarName, personalityId, resetToIdle, setPhaseSafe],
+    [avatarName, cancelReplyDelay, personalityId, resetToIdle, setPhaseSafe],
   );
 
-  const processRef = useRef(processTranscript);
   processRef.current = processTranscript;
 
   useEffect(() => {
@@ -99,29 +141,39 @@ export const useAvatarVoiceTalk = ({
     initVoiceTalk();
     bindVoiceListeners({
       onPartial: updateTranscript,
-      onFinal: updateTranscript,
+      onFinal: (text) => {
+        updateTranscript(text);
+        if (text.trim()) {
+          scheduleReplyAfterSilence();
+        }
+      },
       onSpeechStarted: () => {
         if (phaseRef.current === 'listening') {
+          cancelReplyDelay();
           setLiveTranscript((prev) => prev || '');
         }
       },
       onListenEnd: () => {
-        if (phaseRef.current === 'listening') {
-          void processRef.current(transcriptRef.current);
-        }
+        scheduleReplyAfterSilence();
       },
-      onError: () => {
-        if (phaseRef.current === 'listening') {
-          resetToIdle();
-          setLiveTranscript('');
-          Alert.alert('', AVATAR_TALK_VOICE_ERROR);
+      onError: (event) => {
+        if (phaseRef.current !== 'listening') {
+          return;
         }
+        if (isBenignAndroidSpeechError(event)) {
+          return;
+        }
+        cancelReplyDelay();
+        resetToIdle();
+        setLiveTranscript('');
+        Alert.alert('', AVATAR_TALK_VOICE_ERROR);
       },
     });
     return () => {
+      cancelReplyDelay();
       unbindVoiceTalk();
     };
-  }, [resetToIdle, updateTranscript]);
+  }, [cancelReplyDelay, resetToIdle, scheduleReplyAfterSilence, updateTranscript]);
 
   const startTalk = useCallback(async () => {
     if (phaseRef.current !== 'idle') {
@@ -131,6 +183,7 @@ export const useAvatarVoiceTalk = ({
       Alert.alert('', AVATAR_TALK_MIC_DENIED);
       return;
     }
+    cancelReplyDelay();
     transcriptRef.current = '';
     setLiveTranscript('');
     setAvatarReplyText('');
@@ -142,28 +195,14 @@ export const useAvatarVoiceTalk = ({
       resetToIdle();
       Alert.alert('', AVATAR_TALK_MIC_DENIED);
     }
-  }, [resetToIdle, setPhaseSafe]);
-
-  const stopTalk = useCallback(async () => {
-    if (phaseRef.current !== 'listening') {
-      return;
-    }
-    const captured = transcriptRef.current;
-    setPhaseSafe('processing');
-    setEmotion('thinking');
-    try {
-      await stopListening();
-    } catch {
-      // still process what we captured
-    }
-    await processRef.current(captured);
-  }, [setPhaseSafe]);
+  }, [cancelReplyDelay, resetToIdle, setPhaseSafe]);
 
   const interruptSpeaking = useCallback(async () => {
     if (phaseRef.current !== 'speaking') {
       return;
     }
-    await stopSpeaking();
+    await stopSpeakLine();
+    processingRef.current = false;
     resetToIdle();
   }, [resetToIdle]);
 
@@ -172,18 +211,18 @@ export const useAvatarVoiceTalk = ({
       interruptSpeaking();
     } else if (phaseRef.current === 'idle') {
       startTalk();
-    } else if (phaseRef.current === 'listening') {
-      stopTalk();
     }
-  }, [interruptSpeaking, startTalk, stopTalk]);
+    // listening: no second tap — reply auto like Android
+  }, [interruptSpeaking, startTalk]);
 
   const endSession = useCallback(async () => {
+    cancelReplyDelay();
     await haltAllVoice();
     transcriptRef.current = '';
     setLiveTranscript('');
     setAvatarReplyText('');
     resetToIdle();
-  }, [resetToIdle]);
+  }, [cancelReplyDelay, resetToIdle]);
 
   const showTranscriptBox =
     phase === 'listening' || phase === 'processing' || phase === 'speaking';

@@ -9,7 +9,7 @@ import {
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import HumanoidAvatarView from '../components/HumanoidAvatarView';
+import RobotAvatarView from '../components/RobotAvatarView';
 import { useAvatarVoiceTalk } from '../hooks/useAvatarVoiceTalk';
 import {
   homeCardBorder,
@@ -25,6 +25,7 @@ import {
   AVATAR_TALK_AVATAR_LABEL,
   AVATAR_TALK_CHANGE_SETUP,
   AVATAR_TALK_LISTENING,
+  AVATAR_TALK_LISTENING_AUTO,
   AVATAR_TALK_MODE_SUFFIX,
   AVATAR_TALK_SPEAKING,
   AVATAR_TALK_TAP_SPEAK,
@@ -38,6 +39,8 @@ import { getPersonalityConfig } from '../constants/personalityAvatar';
 import { spacings, style } from '../constants/Fonts';
 import { BaseStyle } from '../constants/Style';
 import { AuthStackParamList } from '../navigation/types';
+import { speakTestLine, TTS_TEST_LINE } from '../utils/ttsTest';
+import { heightPercentageToDP } from '../utils';
 
 type Props = NativeStackScreenProps<AuthStackParamList, 'AvatarTalk'>;
 
@@ -50,12 +53,9 @@ const formatTimer = (sec: number) => {
 const AvatarTalkScreen = ({ navigation, route }: Props) => {
   const {
     avatarName,
-    avatarImageUri,
-    avatarGender: routeGender,
     personalityId,
     personalityTitle,
   } = route.params;
-  const avatarGender = routeGender || 'male';
   const accent = getPersonalityConfig(personalityId).accentColor;
   const [elapsed, setElapsed] = useState(0);
 
@@ -81,6 +81,10 @@ const AvatarTalkScreen = ({ navigation, route }: Props) => {
     void endSession().then(() => navigation.navigate('Home'));
   }, [endSession, navigation.navigate]);
 
+  const handleTestSpeak = useCallback(() => {
+    void speakTestLine();
+  }, []);
+
   const youDisplay = liveTranscript.trim()
     ? liveTranscript
     : isListening
@@ -90,7 +94,7 @@ const AvatarTalkScreen = ({ navigation, route }: Props) => {
   const micHint = isTalking
     ? AVATAR_TALK_TAP_STOP_VOICE
     : isListening
-      ? AVATAR_TALK_TAP_STOP
+      ? AVATAR_TALK_LISTENING_AUTO
       : isProcessing
         ? AVATAR_TALK_THINKING
         : AVATAR_TALK_TAP_SPEAK;
@@ -118,9 +122,7 @@ const AvatarTalkScreen = ({ navigation, route }: Props) => {
           showsVerticalScrollIndicator={false}
           bounces={false}>
           <View style={styles.avatarSection}>
-            <HumanoidAvatarView
-              faceImageUri={avatarImageUri}
-              avatarGender={avatarGender}
+            <RobotAvatarView
               personalityId={personalityId}
               emotion={emotion}
               isListening={isListening}
@@ -134,6 +136,21 @@ const AvatarTalkScreen = ({ navigation, route }: Props) => {
               {personalityTitle} {AVATAR_TALK_MODE_SUFFIX}
             </Text>
           </View>
+
+          {/* <TouchableOpacity
+            style={styles.testTtsBtn}
+            onPress={handleTestSpeak}
+            activeOpacity={0.85}>
+            <MaterialCommunityIcons
+              name="volume-high"
+              size={20}
+              color={whiteColor}
+            />
+            <Text style={styles.testTtsBtnText}>Test Speak (TTS)</Text>
+          </TouchableOpacity>
+          <Text style={styles.testTtsPreview} numberOfLines={2}>
+            "{TTS_TEST_LINE}"
+          </Text> */}
 
           {showTranscriptBox ? (
             <View style={styles.transcriptCard}>
@@ -267,6 +284,29 @@ const styles = StyleSheet.create({
     fontSize: style.fontSizeSmall1x.fontSize,
     ...style.fontWeightThin,
   },
+  testTtsBtn: {
+    ...BaseStyle.flexDirectionRow,
+    ...BaseStyle.alignItemsCenter,
+    ...BaseStyle.justifyContentCenter,
+    gap: spacings.small2x,
+    backgroundColor: personalityFriendlyGreen,
+    paddingHorizontal: spacings.xLarge,
+    paddingVertical: spacings.large,
+    borderRadius: 24,
+    marginBottom: spacings.small2x,
+  },
+  testTtsBtnText: {
+    color: whiteColor,
+    fontSize: style.fontSizeNormal.fontSize,
+    ...style.fontWeightMedium,
+  },
+  testTtsPreview: {
+    color: loginTextGrey,
+    fontSize: style.fontSizeSmall.fontSize,
+    textAlign: 'center',
+    marginBottom: spacings.large,
+    paddingHorizontal: spacings.normal,
+  },
   transcriptCard: {
     width: '100%',
     backgroundColor: whiteColor,
@@ -315,6 +355,7 @@ const styles = StyleSheet.create({
   micSection: {
     ...BaseStyle.alignItemsCenter,
     paddingVertical: spacings.normal,
+    marginBottom: heightPercentageToDP(2),
   },
   micBtn: {
     width: 88,
@@ -322,6 +363,7 @@ const styles = StyleSheet.create({
     borderRadius: 44,
     backgroundColor: homeHeaderPurple,
     ...BaseStyle.alignJustifyCenter,
+   
   },
   micActive: { transform: [{ scale: 1.06 }] },
   micHint: {

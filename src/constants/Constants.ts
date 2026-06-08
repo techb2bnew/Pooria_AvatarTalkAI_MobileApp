@@ -84,6 +84,8 @@ export const PERSONALITY_MOTIVATIONAL_DESC = 'Inspiring and energetic.';
 
 export const AVATAR_TALK_TAP_SPEAK = 'Tap to speak';
 export const AVATAR_TALK_TAP_STOP = 'Tap again to send';
+export const AVATAR_TALK_LISTENING_AUTO =
+  'Speak now — reply comes automatically';
 export const AVATAR_TALK_TAP_STOP_VOICE = 'Tap to stop voice';
 export const AVATAR_TALK_CHANGE_SETUP = 'Change avatar & personality';
 export const AVATAR_TALK_MODE_SUFFIX = 'Mode';
